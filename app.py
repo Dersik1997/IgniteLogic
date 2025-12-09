@@ -24,7 +24,7 @@ MQTT_BROKER = "broker.emqx.io"
 MQTT_PORT = 1883
 TOPIC_SENSOR = "Iot/IgniteLogic/sensor"
 TOPIC_OUTPUT = "Iot/IgniteLogic/output" 
-MODEL_PATH = "modal.pkl" 
+MODEL_PATH = "model.pkl" 
 
 # timezone GMT+7 helper
 TZ = timezone(timedelta(hours=7))
@@ -313,3 +313,4 @@ with right:
 
 # after UI render, drain queue (so next rerun shows fresh data)
 process_queue()
+
