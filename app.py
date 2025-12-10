@@ -1,4 +1,4 @@
-# app.py (Dengan Logika Override Kritis Suhu/Lembap)
+# app.py (Final - Logika Aturan Prioritas & Autorefresh 500ms)
 
 import streamlit as st
 import pandas as pd
@@ -42,9 +42,9 @@ GLOBAL_MQ = queue.Queue()
 # Streamlit page setup
 # ---------------------------
 
-st.set_page_config(page_title="IoT Realtime Dashboard (scikit-learn + CSV Log)", layout="wide")
-st.title("💡 Dashboard Monitoring Lingkungan Realtime (Prediksi scikit-learn & CSV Log)")
-st.caption("ESP32 mengirim data mentah. Server (Streamlit) membuat prediksi ML/Override, mengirim perintah LED balik, dan menyimpan log.")
+st.set_page_config(page_title="IoT Realtime Dashboard (Rules & CSV Log)", layout="wide")
+st.title("💡 Dashboard Monitoring Lingkungan Realtime (Logika Aturan Prioritas)")
+st.caption("Prediksi ML dinonaktifkan. Status dikontrol oleh Aturan Prioritas (Suhu/Lembap/Cahaya).")
 
 # ---------------------------
 # session_state init
@@ -68,14 +68,14 @@ if "last" not in st.session_state:
 if "mqtt_thread_started" not in st.session_state:
     st.session_state.mqtt_thread_started = False
     
-# Inisialisasi/Muat Model scikit-learn
+# Muat Model (Hanya untuk debug/penempatan, tidak digunakan untuk prediksi utama)
 if "ml_model" not in st.session_state:
     try:
         st.session_state.ml_model = joblib.load(MODEL_PATH)
-        st.info(f"Model scikit-learn ({MODEL_PATH}) berhasil dimuat.")
+        st.info(f"Model scikit-learn ({MODEL_PATH}) dimuat tetapi TIDAK digunakan. Menggunakan Logika Aturan Prioritas.")
     except FileNotFoundError:
         st.session_state.ml_model = None
-        st.error(f"File model ML tidak ditemukan di: {MODEL_PATH}. Prediksi server dinonaktifkan.")
+        st.error(f"File model ML tidak ditemukan di: {MODEL_PATH}.")
     except Exception as e:
         st.session_state.ml_model = None
         st.error(f"Error memuat model ML: {e}")
@@ -138,24 +138,26 @@ start_mqtt_thread_once()
 
 # --- Helper function for status color ---
 def get_status_color(status):
-    # Logika warna disesuaikan untuk menangani status OVERRIDE KRITIS
     if "Aman" in status or "HIJAU" in status:
         return "green"
-    elif "Waspada" in status or "KUNING" in status:
+    elif "WASPADA" in status or "KUNING" in status:
         return "orange"
-    # Merah untuk status Tidak Aman dan Override Kritis
-    elif "Tidak Aman" in status or "MERAH" in status or "KRITIS" in status:
+    elif "MERAH" in status or "KRITIS" in status:
         return "red"
     else:
         return "gray"
 # ----------------------------------------
 
 # ---------------------------
-# Drain queue (process incoming msgs) - LOGIKA UTAMA: PREDIKSI, KONTROL & CSV LOGGING
+# Drain queue (process incoming msgs) - LOGIKA UTAMA: ATURAN PRIORITAS
 # ---------------------------
 def process_queue():
     updated = False
     q = st.session_state.msg_queue
+    
+    # Ambang batas cahaya: 4095 adalah terang penuh (dibalik dari rawLDR). 
+    # Kita asumsikan > 3000 berarti "cahaya masuk" signifikan.
+    LIGHT_THRESHOLD = 3000 
     
     while not q.empty():
         item = q.get()
@@ -175,7 +177,7 @@ def process_queue():
             # Ambil data dari ESP32 (Sesuai nama variabel di JSON payload ESP32)
             suhu = float(d.get("suhu", np.nan))
             lembap = float(d.get("lembap", np.nan))
-            light = float(d.get("light", np.nan)) # Nilai Light yang DIBALIK (sesuai ML)
+            light = float(d.get("light", np.nan)) # Nilai Light yang DIBALIK (4095=Terang)
             rawLight = int(d.get("rawLight", np.nan)) 
             status_esp = d.get("label", "N/A") 
             
@@ -191,51 +193,35 @@ def process_queue():
             }
             
             # =========================================================
-            # LOGIKA OVERRIDE KRITIS (ATURAN BISNIS)
+            # LOGIKA KEPUTUSAN BERDASARKAN ATURAN PRIORITAS
             # =========================================================
-            is_critical_override = False
             
-            # Rule: Jika suhu > 30 DAN kelembaban >= 90, paksa MERAH/KRITIS
-            if not np.isnan([suhu, lembap]).any() and (suhu > 30.0 and lembap >= 90.0):
-                prediksi_server_label = "OVERRIDE KRITIS - MERAH"
+            prediksi_server_label = "N/A"
+            perintah_led = "N/A"
+            prediksi_server_raw = "RULE_N/A"
+            
+            # --- 1. PRIORITY 1: KRITIS / MERAH ---
+            # Rule: Jika suhu > 30 ATAU kelembaban > 30, paksa MERAH
+            if not np.isnan([suhu, lembap]).any() and (suhu > 30.0 or lembap > 30.0):
+                prediksi_server_label = "KRITIS - MERAH (Suhu/Lembap Tinggi)"
                 perintah_led = "LED_MERAH"
-                prediksi_server_raw = "OVERRIDE"
-                is_critical_override = True
+                prediksi_server_raw = "RULE_MERAH_KRITIS"
                 
-            # =========================================================
-            
-            # Jalankan Prediksi ML hanya jika tidak ada Override Kritis
-            if not is_critical_override:
-                prediksi_server_label = "N/A"
-                prediksi_server_raw = "N/A"
-                perintah_led = "N/A"
-            
-                if st.session_state.ml_model and not np.isnan([suhu, lembap, light]).any():
-                    try:
-                        # Input Model: [suhu, lembap, light]
-                        fitur_input = np.array([[np.float64(suhu), np.float64(lembap), np.float64(light)]]) 
-                        
-                        prediksi_raw = st.session_state.ml_model.predict(fitur_input)[0]
-                        prediksi_server_raw = str(prediksi_raw)
-                        
-                        # --- INTERPRETASI ML (Pemetaan 3-Kelas: 0, 1, 2) ---
-                        if prediksi_raw == 0:
-                            prediksi_server_label = "Aman (0) - HIJAU"
-                            perintah_led = "LED_HIJAU"
-                        elif prediksi_raw == 1:
-                            prediksi_server_label = "Waspada (1) - KUNING"
-                            perintah_led = "LED_KUNING"
-                        elif prediksi_raw == 2:
-                            prediksi_server_label = "Tidak Aman (2) - MERAH"
-                            perintah_led = "LED_MERAH"
-                        else:
-                             prediksi_server_label = f"UNKNOWN ({prediksi_raw})"
-                             perintah_led = "LED_MERAH" 
+            # --- 2. PRIORITY 2: WASPADA / KUNING ---
+            # Rule: Jika cahaya masuk (light > 3000), HANYA JIKA TIDAK KRITIS
+            elif not np.isnan(light) and light > LIGHT_THRESHOLD:
+                prediksi_server_label = "WASPADA - KUNING (Cahaya Masuk)"
+                perintah_led = "LED_KUNING"
+                prediksi_server_raw = "RULE_KUNING_CAHAYA"
 
-                    except Exception as e:
-                        prediksi_server_label = f"ML Error: {e}" 
-            
-            # --- Kirim Perintah MQTT (Dilakukan hanya sekali) ---
+            # --- 3. PRIORITY 3: AMAN / HIJAU ---
+            # Default jika tidak ada kondisi yang terpenuhi
+            else:
+                prediksi_server_label = "Aman - HIJAU"
+                perintah_led = "LED_HIJAU"
+                prediksi_server_raw = "RULE_AMAN_DEFAULT"
+
+            # --- Kirim Perintah MQTT ---
             if pub_client and perintah_led != "N/A":
                 try:
                     pub_client.publish(TOPIC_OUTPUT, perintah_led) 
@@ -260,7 +246,7 @@ def process_queue():
     if updated and st.session_state.logs:
         try:
             df_log = pd.DataFrame(st.session_state.logs)
-            df_export = df_log[['ts', 'suhu', 'lembap', 'light', 'rawLight', 'prediksi_server']].copy()
+            df_export = df_log[['ts', 'suhu', 'lembap', 'light', 'rawLight', 'prediksi_server', 'prediksi_server_raw']].copy()
             df_export.to_csv(CSV_LOG_PATH, index=False)
         except Exception:
             pass
@@ -271,10 +257,11 @@ def process_queue():
 _ = process_queue()
 
 # ---------------------------
-# UI layout (Sudah Sesuai)
+# UI layout
 # ---------------------------
 if HAS_AUTOREFRESH:
-    st_autorefresh(interval=2000, limit=None, key="autorefresh") 
+    # *** PERUBAHAN UNTUK ANIMASI LEBIH MULUS: 2000ms -> 500ms ***
+    st_autorefresh(interval=500, limit=None, key="autorefresh") 
 
 
 left, right = st.columns([1, 2])
@@ -298,18 +285,18 @@ with left:
         st.caption(f"Light Mentah (LDR ADC): **{last.get('rawLight')}**")
         st.markdown("---")
 
-        st.markdown("### Prediksi Server (scikit-learn)")
+        st.markdown("### Status Keputusan Server")
         pred_text = last.get('prediksi_server', 'N/A')
         pred_color = get_status_color(pred_text)
         
-        # Penanganan display untuk Override Kritis
+        # Penanganan display untuk status Merah Kritis
         display_text = pred_text
-        if "OVERRIDE KRITIS" in pred_text:
+        if "MERAH" in pred_text and ("Suhu" in pred_text or "Lembap" in pred_text):
             display_text = f"🚨 {pred_text} 🚨"
             
         st.markdown(f"**<p style='font-size: 24px; color: {pred_color};'>{display_text}</p>**", unsafe_allow_html=True)
         
-        st.caption(f"Prediksi Mentah (Raw Output): **{last.get('prediksi_server_raw', 'N/A')}**")
+        st.caption(f"Aturan yang Diterapkan: **{last.get('prediksi_server_raw', 'N/A')}**")
         st.caption(f"Perintah Terakhir ke ESP32: **{last.get('perintah_terkirim', 'N/A')}**")
 
     else:
@@ -364,14 +351,12 @@ with right:
 
     st.markdown("### Recent Logs")
     if st.session_state.logs:
-        log_columns = ["ts", "suhu", "lembap", "light", "prediksi_server", "perintah_terkirim"]
-        if 'prediksi_server_raw' in st.session_state.logs[0]:
-             log_columns.insert(5, "prediksi_server_raw")
+        log_columns = ["ts", "suhu", "lembap", "light", "prediksi_server", "prediksi_server_raw", "perintah_terkirim"]
              
         df_display = pd.DataFrame(st.session_state.logs)[log_columns].rename(columns={
             "light": "Light (Dibalik)",
-            "prediksi_server": "Prediksi Server (ML)",
-            "prediksi_server_raw": "Raw Output",
+            "prediksi_server": "Status",
+            "prediksi_server_raw": "Aturan Diterapkan",
             "perintah_terkirim": "Perintah Ke ESP32"
         })
         st.dataframe(df_display[::-1].head(100), use_container_width=True)
