@@ -1,4 +1,4 @@
-# app.py (Logika Berbasis Aturan Prioritas)
+# app.py (Logika Berbasis Aturan Prioritas Baru: Suhu/Lembap/Cahaya)
 
 import streamlit as st
 import pandas as pd
@@ -68,11 +68,11 @@ if "last" not in st.session_state:
 if "mqtt_thread_started" not in st.session_state:
     st.session_state.mqtt_thread_started = False
     
-# Muat Model (Hanya untuk debug/penempatan, tidak digunakan untuk prediksi utama)
+# Muat Model (Dinonaktifkan, hanya untuk memastikan file ada)
 if "ml_model" not in st.session_state:
     try:
         st.session_state.ml_model = joblib.load(MODEL_PATH)
-        st.info(f"Model scikit-learn ({MODEL_PATH}) dimuat tetapi TIDAK digunakan. Menggunakan Logika Aturan Prioritas.")
+        st.info(f"Model scikit-learn ({MODEL_PATH}) dimuat tetapi **TIDAK digunakan**. Menggunakan Logika Aturan Prioritas.")
     except FileNotFoundError:
         st.session_state.ml_model = None
         st.error(f"File model ML tidak ditemukan di: {MODEL_PATH}.")
@@ -142,7 +142,7 @@ def get_status_color(status):
         return "green"
     elif "Waspada" in status or "KUNING" in status:
         return "orange"
-    elif "MERAH" in status: # Termasuk kondisi override kritis
+    elif "MERAH" in status: 
         return "red"
     else:
         return "gray"
@@ -155,8 +155,8 @@ def process_queue():
     updated = False
     q = st.session_state.msg_queue
     
-    # Ambil nilai ambang batas cahaya (4095 = terang total)
-    # 3000 adalah contoh ambang batas "cahaya masuk"
+    # Ambang Batas Cahaya Masuk (4095 = Terang Maksimal)
+    # Sesuaikan nilai ini jika 3000 terlalu tinggi/rendah
     LIGHT_THRESHOLD = 3000 
     
     while not q.empty():
@@ -174,7 +174,7 @@ def process_queue():
         elif ttype == "sensor":
             d = item.get("data", {})
             
-            # Ambil data dari ESP32 (Sesuai nama variabel di JSON payload ESP32)
+            # Ambil data dari ESP32
             suhu = float(d.get("suhu", np.nan))
             lembap = float(d.get("lembap", np.nan))
             light = float(d.get("light", np.nan)) # Nilai Light yang DIBALIK (4095=Terang)
@@ -200,26 +200,34 @@ def process_queue():
             perintah_led = "N/A"
             prediksi_server_raw = "RULE_N/A"
             
-            # --- 1. PRIORITY 1: KRITIS / MERAH ---
-            # Jika suhu > 30 ATAU kelembaban > 30, paksa MERAH
-            if not np.isnan([suhu, lembap]).any() and (suhu > 30.0 or lembap > 30.0):
-                prediksi_server_label = "KRITIS - MERAH (Suhu/Lembap Tinggi)"
-                perintah_led = "LED_MERAH"
-                prediksi_server_raw = "RULE_MERAH_KRITIS"
+            # Cek jika data numerik valid
+            if not np.isnan([suhu, lembap, light]).any():
                 
-            # --- 2. PRIORITY 2: WASPADA / KUNING ---
-            # Jika cahaya masuk (light > 3000), HANYA JIKA TIDAK KRITIS
-            elif not np.isnan(light) and light > LIGHT_THRESHOLD:
-                prediksi_server_label = "WASPADA - KUNING (Cahaya Masuk)"
-                perintah_led = "LED_KUNING"
-                prediksi_server_raw = "RULE_KUNING_CAHAYA"
+                # --- 1. PRIORITY 1: MERAH (Suhu TINGGI ATAU Lembap SANGAT TINGGI) ---
+                if (suhu > 30.0) or (lembap >= 90.0):
+                    prediksi_server_label = "KRITIS - MERAH (Suhu > 30°C ATAU Lembap ≥ 90%)"
+                    perintah_led = "LED_MERAH"
+                    prediksi_server_raw = "RULE_MERAH_KRITIS"
+                    
+                # --- 2. PRIORITY 2: KUNING (Cahaya Masuk TINGGI) ---
+                # HANYA dieksekusi jika kondisi MERAH TIDAK terpenuhi
+                elif light > LIGHT_THRESHOLD:
+                    prediksi_server_label = "WASPADA - KUNING (Cahaya Masuk > 3000)"
+                    perintah_led = "LED_KUNING"
+                    prediksi_server_raw = "RULE_KUNING_CAHAYA"
 
-            # --- 3. PRIORITY 3: AMAN / HIJAU ---
-            # Default jika tidak ada kondisi yang terpenuhi
+                # --- 3. PRIORITY 3: AMAN (Default) ---
+                # Default jika tidak ada kondisi yang terpenuhi
+                else:
+                    prediksi_server_label = "Aman - HIJAU"
+                    perintah_led = "LED_HIJAU"
+                    prediksi_server_raw = "RULE_AMAN_DEFAULT"
+
             else:
-                prediksi_server_label = "Aman - HIJAU"
-                perintah_led = "LED_HIJAU"
-                prediksi_server_raw = "RULE_AMAN_DEFAULT"
+                 # Jika ada sensor yang NaN/tidak valid
+                 prediksi_server_label = "ERROR: Data Sensor Invalid"
+                 prediksi_server_raw = "RULE_ERROR"
+
 
             # --- Kirim Perintah MQTT ---
             if pub_client and perintah_led != "N/A":
@@ -246,7 +254,6 @@ def process_queue():
     if updated and st.session_state.logs:
         try:
             df_log = pd.DataFrame(st.session_state.logs)
-            # Simpan Raw Output untuk keperluan debug dan audit
             df_export = df_log[['ts', 'suhu', 'lembap', 'light', 'rawLight', 'prediksi_server', 'prediksi_server_raw']].copy()
             df_export.to_csv(CSV_LOG_PATH, index=False)
         except Exception:
@@ -274,6 +281,7 @@ with left:
     st.write("Topic Sensor (Input):", TOPIC_SENSOR)
     st.write("Topic Output (Control):", TOPIC_OUTPUT)
     st.markdown("---")
+    
 
     st.header("Last Reading")
     if st.session_state.last:
@@ -289,7 +297,7 @@ with left:
         pred_text = last.get('prediksi_server', 'N/A')
         pred_color = get_status_color(pred_text)
         
-        # Penanganan display untuk Override Kritis
+        # Penanganan display untuk status Kritis
         display_text = pred_text
         if "MERAH" in pred_text and ("Suhu" in pred_text or "Lembap" in pred_text):
             display_text = f"🚨 {pred_text} 🚨"
@@ -351,7 +359,6 @@ with right:
 
     st.markdown("### Recent Logs")
     if st.session_state.logs:
-        # Menampilkan Raw Output (Aturan yang Diterapkan) di log
         log_columns = ["ts", "suhu", "lembap", "light", "prediksi_server", "prediksi_server_raw", "perintah_terkirim"]
              
         df_display = pd.DataFrame(st.session_state.logs)[log_columns].rename(columns={
