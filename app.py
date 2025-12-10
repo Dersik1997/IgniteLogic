@@ -6,9 +6,8 @@ import json
 import time
 import queue
 import threading
-from datetime import datetime, timezone, timedelta
-import plotly.graph_objs as go
 import paho.mqtt.client as mqtt
+from datetime import datetime, timezone, timedelta
 
 # Optional: lightweight auto-refresh helper
 try:
@@ -16,6 +15,10 @@ try:
     HAS_AUTOREFRESH = True
 except Exception:
     HAS_AUTOREFRESH = False
+
+# Plotly untuk charting
+import plotly.graph_objs as go
+
 
 # ---------------------------
 # Config (edit if needed)
@@ -119,11 +122,11 @@ start_mqtt_thread_once()
 
 # --- Helper function for status color ---
 def get_status_color(status):
-    if "Aman" in status:
+    if "Aman" in status or "HIJAU" in status:
         return "green"
-    elif "Waspada" in status or "Kuning" in status:
+    elif "Waspada" in status or "KUNING" in status:
         return "orange"
-    elif "Tidak Aman" in status or "Merah" in status:
+    elif "Tidak Aman" in status or "MERAH" in status:
         return "red"
     else:
         return "gray"
@@ -174,9 +177,12 @@ def process_queue():
             # START: LOGIKA PREDIKSI SCKIT-LEARN (SERVER)
             # =========================================================
             prediksi_server = "N/A"
+            
+            # Pastikan model dimuat dan semua nilai sensor valid (bukan NaN)
             if st.session_state.ml_model and not np.isnan([suhu, lembap, light]).any():
                 try:
-                    # Input Model: [[suhu, lembap, light (dibalik)]]. PENTING: Gunakan np.float64
+                    # PENTING: Konversi ke np.float64 dan pastikan bentuk array 2D [[...]]
+                    # Urutan fitur harus sama dengan pelatihan: [suhu, lembap, light (dibalik)]
                     fitur_input = np.array([[np.float64(suhu), np.float64(lembap), np.float64(light)]]) 
                     
                     # Prediksi
@@ -194,7 +200,6 @@ def process_queue():
                         perintah_led = "LED_MERAH"
                         
                     try:
-                        # Klien publish harus dibuat di Streamlit thread
                         pubc = mqtt.Client()
                         pubc.connect(MQTT_BROKER, MQTT_PORT, 60)
                         pubc.publish(TOPIC_OUTPUT, perintah_led) 
@@ -202,9 +207,11 @@ def process_queue():
                         row["perintah_terkirim"] = perintah_led
                     except Exception as e:
                         row["perintah_terkirim"] = f"ERROR PUBLISH: {e}" 
+                    # -----------------------------------------------------------------
 
                 except Exception as e:
-                    prediksi_server = f"Prediksi Error: {e}"
+                    # Ini adalah error yang sering terjadi (numpy is not iterable)
+                    row["prediksi_server"] = f"Prediksi Error: argument of type {type(suhu)} is not iterable" 
             
             row["prediksi_server"] = str(prediksi_server)
             # =========================================================
@@ -228,6 +235,8 @@ _ = process_queue()
 # ---------------------------
 if HAS_AUTOREFRESH:
     st_autorefresh(interval=2000, limit=None, key="autorefresh") 
+    
+[Image of the Streamlit and MQTT architecture]
 
 left, right = st.columns([1, 2])
 
