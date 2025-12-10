@@ -1,4 +1,4 @@
-# app.py (Final - Logika Aturan Prioritas & Autorefresh 500ms)
+# app.py (Logika Berbasis Aturan Prioritas)
 
 import streamlit as st
 import pandas as pd
@@ -140,9 +140,9 @@ start_mqtt_thread_once()
 def get_status_color(status):
     if "Aman" in status or "HIJAU" in status:
         return "green"
-    elif "WASPADA" in status or "KUNING" in status:
+    elif "Waspada" in status or "KUNING" in status:
         return "orange"
-    elif "MERAH" in status or "KRITIS" in status:
+    elif "MERAH" in status: # Termasuk kondisi override kritis
         return "red"
     else:
         return "gray"
@@ -155,8 +155,8 @@ def process_queue():
     updated = False
     q = st.session_state.msg_queue
     
-    # Ambang batas cahaya: 4095 adalah terang penuh (dibalik dari rawLDR). 
-    # Kita asumsikan > 3000 berarti "cahaya masuk" signifikan.
+    # Ambil nilai ambang batas cahaya (4095 = terang total)
+    # 3000 adalah contoh ambang batas "cahaya masuk"
     LIGHT_THRESHOLD = 3000 
     
     while not q.empty():
@@ -201,14 +201,14 @@ def process_queue():
             prediksi_server_raw = "RULE_N/A"
             
             # --- 1. PRIORITY 1: KRITIS / MERAH ---
-            # Rule: Jika suhu > 30 ATAU kelembaban > 30, paksa MERAH
+            # Jika suhu > 30 ATAU kelembaban > 30, paksa MERAH
             if not np.isnan([suhu, lembap]).any() and (suhu > 30.0 or lembap > 30.0):
                 prediksi_server_label = "KRITIS - MERAH (Suhu/Lembap Tinggi)"
                 perintah_led = "LED_MERAH"
                 prediksi_server_raw = "RULE_MERAH_KRITIS"
                 
             # --- 2. PRIORITY 2: WASPADA / KUNING ---
-            # Rule: Jika cahaya masuk (light > 3000), HANYA JIKA TIDAK KRITIS
+            # Jika cahaya masuk (light > 3000), HANYA JIKA TIDAK KRITIS
             elif not np.isnan(light) and light > LIGHT_THRESHOLD:
                 prediksi_server_label = "WASPADA - KUNING (Cahaya Masuk)"
                 perintah_led = "LED_KUNING"
@@ -246,6 +246,7 @@ def process_queue():
     if updated and st.session_state.logs:
         try:
             df_log = pd.DataFrame(st.session_state.logs)
+            # Simpan Raw Output untuk keperluan debug dan audit
             df_export = df_log[['ts', 'suhu', 'lembap', 'light', 'rawLight', 'prediksi_server', 'prediksi_server_raw']].copy()
             df_export.to_csv(CSV_LOG_PATH, index=False)
         except Exception:
@@ -257,11 +258,10 @@ def process_queue():
 _ = process_queue()
 
 # ---------------------------
-# UI layout
+# UI layout (Sudah Sesuai)
 # ---------------------------
 if HAS_AUTOREFRESH:
-    # *** PERUBAHAN UNTUK ANIMASI LEBIH MULUS: 2000ms -> 500ms ***
-    st_autorefresh(interval=500, limit=None, key="autorefresh") 
+    st_autorefresh(interval=2000, limit=None, key="autorefresh") 
 
 
 left, right = st.columns([1, 2])
@@ -289,7 +289,7 @@ with left:
         pred_text = last.get('prediksi_server', 'N/A')
         pred_color = get_status_color(pred_text)
         
-        # Penanganan display untuk status Merah Kritis
+        # Penanganan display untuk Override Kritis
         display_text = pred_text
         if "MERAH" in pred_text and ("Suhu" in pred_text or "Lembap" in pred_text):
             display_text = f"🚨 {pred_text} 🚨"
@@ -351,6 +351,7 @@ with right:
 
     st.markdown("### Recent Logs")
     if st.session_state.logs:
+        # Menampilkan Raw Output (Aturan yang Diterapkan) di log
         log_columns = ["ts", "suhu", "lembap", "light", "prediksi_server", "prediksi_server_raw", "perintah_terkirim"]
              
         df_display = pd.DataFrame(st.session_state.logs)[log_columns].rename(columns={
