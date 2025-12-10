@@ -1,4 +1,4 @@
-# app.py
+# app.py (Disempurnakan untuk 3 Kelas: 0, 1, 2)
 
 import streamlit as st
 import pandas as pd
@@ -30,7 +30,7 @@ TOPIC_OUTPUT = "Iot/IgniteLogic/output"
 MODEL_PATH = "model.pkl"  
 CSV_LOG_PATH = "iot_sensor_data.csv" # File log otomatis
 
-# Timezone helper
+# Timezone helper (WIB/WITA/WIT, di sini diatur ke UTC+7)
 TZ = timezone(timedelta(hours=7))
 
 # ---------------------------
@@ -53,7 +53,6 @@ if "msg_queue" not in st.session_state:
     st.session_state.msg_queue = GLOBAL_MQ
 
 if "logs" not in st.session_state:
-    # Coba muat data log yang sudah ada dari CSV saat startup
     try:
         if os.path.exists(CSV_LOG_PATH):
             df_initial = pd.read_csv(CSV_LOG_PATH)
@@ -72,7 +71,6 @@ if "mqtt_thread_started" not in st.session_state:
 # Inisialisasi/Muat Model scikit-learn
 if "ml_model" not in st.session_state:
     try:
-        # joblib.load sangat cocok untuk file .pkl dari scikit-learn
         st.session_state.ml_model = joblib.load(MODEL_PATH)
         st.info(f"Model scikit-learn ({MODEL_PATH}) berhasil dimuat.")
     except FileNotFoundError:
@@ -200,27 +198,25 @@ def process_queue():
             # Cek apakah model ada dan semua fitur input valid (bukan NaN)
             if st.session_state.ml_model and not np.isnan([suhu, lembap, light]).any():
                 try:
-                    # Input Model: [suhu, lembap, light] (sesuai feature_names_in_)
+                    # Input Model: [suhu, lembap, light] (Urutan harus sesuai pelatihan model)
                     fitur_input = np.array([[np.float64(suhu), np.float64(lembap), np.float64(light)]]) 
                     
-                    # Prediksi (Hasil prediksi adalah angka: 0.0 atau 1.0)
+                    # Prediksi (Hasil prediksi adalah angka: 0, 1, 2, dll.)
                     prediksi_raw = st.session_state.ml_model.predict(fitur_input)[0]
                     prediksi_server_raw = str(prediksi_raw)
                     
                     # --- INTERPRETASI DAN KONTROL LED BALIK KE ESP32 ---
                     
-                    # Berdasarkan analisis model biner (2 kelas):
+                    # Logika pemetaan 3-Kelas: 0 = HIJAU, 1 = KUNING, 2 = MERAH
                     if prediksi_raw == 0:
                         prediksi_server_label = "Aman (0) - HIJAU"
                         perintah_led = "LED_HIJAU"
                     elif prediksi_raw == 1:
-                        # Dipetakan ke kondisi kritis karena ini adalah kelas kedua yang BUKAN Aman
-                        prediksi_server_label = "TIDAK AMAN (1) - MERAH"
-                        perintah_led = "LED_MERAH"
-                    elif prediksi_raw == 2:
-                        # Logika cadangan jika model diupdate menjadi 3 kelas
-                        prediksi_server_label = "Waspada (2) - KUNING"
+                        prediksi_server_label = "Waspada (1) - KUNING"
                         perintah_led = "LED_KUNING"
+                    elif prediksi_raw == 2:
+                        prediksi_server_label = "Tidak Aman (2) - MERAH"
+                        perintah_led = "LED_MERAH"
                     else:
                          prediksi_server_label = f"UNKNOWN ({prediksi_raw})"
                          perintah_led = "LED_MERAH" 
@@ -235,7 +231,6 @@ def process_queue():
                     prediksi_server_label = f"ML Error: {e}" 
             
             row["prediksi_server"] = prediksi_server_label
-            # Simpan raw prediksi di log untuk debugging jika perlu
             row["prediksi_server_raw"] = prediksi_server_raw 
             # =========================================================
 
@@ -253,10 +248,7 @@ def process_queue():
         try:
             df_log = pd.DataFrame(st.session_state.logs)
             
-            # Hanya simpan kolom yang relevan untuk ML/Logging
             df_export = df_log[['ts', 'suhu', 'lembap', 'light', 'rawLight', 'prediksi_server']].copy()
-            
-            # Tulis ke file CSV (menimpa file setiap update)
             df_export.to_csv(CSV_LOG_PATH, index=False)
             
         except Exception:
@@ -270,7 +262,7 @@ def process_queue():
 _ = process_queue()
 
 # ---------------------------
-# UI layout (Sudah Sesuai)
+# UI layout
 # ---------------------------
 if HAS_AUTOREFRESH:
     st_autorefresh(interval=2000, limit=None, key="autorefresh") 
@@ -302,7 +294,7 @@ with left:
         pred_color = get_status_color(pred_text)
         st.markdown(f"**<p style='font-size: 24px; color: {pred_color};'>● {pred_text}</p>**", unsafe_allow_html=True)
         
-        st.caption(f"Prediksi Mentah: **{last.get('prediksi_server_raw', 'N/A')}**")
+        st.caption(f"Prediksi Mentah (Raw Output): **{last.get('prediksi_server_raw', 'N/A')}**")
         st.caption(f"Perintah Terakhir ke ESP32: **{last.get('perintah_terkirim', 'N/A')}**")
 
     else:
@@ -357,9 +349,15 @@ with right:
 
     st.markdown("### Recent Logs")
     if st.session_state.logs:
-        df_display = pd.DataFrame(st.session_state.logs)[["ts", "suhu", "lembap", "light", "prediksi_server", "perintah_terkirim"]].rename(columns={
+        # Tambahkan prediksi_server_raw ke tampilan log jika ada
+        log_columns = ["ts", "suhu", "lembap", "light", "prediksi_server", "perintah_terkirim"]
+        if 'prediksi_server_raw' in st.session_state.logs[0]:
+             log_columns.insert(5, "prediksi_server_raw")
+             
+        df_display = pd.DataFrame(st.session_state.logs)[log_columns].rename(columns={
             "light": "Light (Dibalik)",
             "prediksi_server": "Prediksi Server (ML)",
+            "prediksi_server_raw": "Raw Output",
             "perintah_terkirim": "Perintah Ke ESP32"
         })
         st.dataframe(df_display[::-1].head(100), use_container_width=True)
