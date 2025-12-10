@@ -8,6 +8,8 @@ import queue
 import threading
 import paho.mqtt.client as mqtt
 from datetime import datetime, timezone, timedelta
+import plotly.graph_objs as go
+import os 
 
 # Optional: lightweight auto-refresh helper
 try:
@@ -16,23 +18,18 @@ try:
 except Exception:
     HAS_AUTOREFRESH = False
 
-# Plotly untuk charting
-import plotly.graph_objs as go
-
-
 # ---------------------------
-# Config (edit if needed)
+# Config 
 # ---------------------------
 MQTT_BROKER = "broker.emqx.io"
 MQTT_PORT = 1883
 TOPIC_SENSOR = "Iot/IgniteLogic/sensor"
-TOPIC_OUTPUT = "Iot/IgniteLogic/output" # Digunakan untuk mengirim perintah LED balik ke ESP32
-MODEL_PATH = "model.pkl" # Pastikan file model scikit-learn ada di folder yang sama
+TOPIC_OUTPUT = "Iot/IgniteLogic/output" 
+MODEL_PATH = "model.pkl" 
+CSV_LOG_PATH = "iot_sensor_data.csv" # File log otomatis
 
-# timezone GMT+7 helper
+# Timezone helper
 TZ = timezone(timedelta(hours=7))
-def now_str():
-    return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 # ---------------------------
 # module-level queue used by MQTT thread
@@ -43,9 +40,9 @@ GLOBAL_MQ = queue.Queue()
 # Streamlit page setup
 # ---------------------------
 
-st.set_page_config(page_title="IoT Realtime Dashboard (scikit-learn)", layout="wide")
-st.title("💡 Dashboard Monitoring Lingkungan Realtime (Prediksi scikit-learn)")
-st.caption("ESP32 mengirim data mentah. Server (Streamlit) membuat prediksi ML dan mengirim perintah LED balik.")
+st.set_page_config(page_title="IoT Realtime Dashboard (scikit-learn + CSV Log)", layout="wide")
+st.title("💡 Dashboard Monitoring Lingkungan Realtime (Prediksi scikit-learn & CSV Log)")
+st.caption("ESP32 mengirim data mentah. Server (Streamlit) membuat prediksi ML, mengirim perintah LED balik, dan menyimpan log.")
 
 # ---------------------------
 # session_state init
@@ -54,7 +51,15 @@ if "msg_queue" not in st.session_state:
     st.session_state.msg_queue = GLOBAL_MQ
 
 if "logs" not in st.session_state:
-    st.session_state.logs = [] 
+    # Coba muat data log yang sudah ada dari CSV saat startup
+    try:
+        if os.path.exists(CSV_LOG_PATH):
+            df_initial = pd.read_csv(CSV_LOG_PATH)
+            st.session_state.logs = df_initial.to_dict('records')
+        else:
+            st.session_state.logs = []
+    except Exception:
+        st.session_state.logs = []
 
 if "last" not in st.session_state:
     st.session_state.last = None
@@ -75,7 +80,7 @@ if "ml_model" not in st.session_state:
         st.error(f"Error memuat model ML: {e}")
 
 # ---------------------------
-# MQTT callbacks
+# MQTT callbacks & Thread Start (Standard boilerplate)
 # ---------------------------
 def _on_connect(client, userdata, flags, rc):
     try:
@@ -95,9 +100,6 @@ def _on_message(client, userdata, msg):
 
     GLOBAL_MQ.put({"_type": "sensor", "data": data, "ts": time.time(), "topic": msg.topic})
 
-# ---------------------------
-# Start MQTT thread (worker)
-# ---------------------------
 def start_mqtt_thread_once():
     def worker():
         client = mqtt.Client() 
@@ -117,7 +119,6 @@ def start_mqtt_thread_once():
         st.session_state.mqtt_thread_started = True
         time.sleep(0.05)
 
-# start thread
 start_mqtt_thread_once()
 
 # --- Helper function for status color ---
@@ -133,7 +134,7 @@ def get_status_color(status):
 # ----------------------------------------
 
 # ---------------------------
-# Drain queue (process incoming msgs) - LOGIKA PREDIKSI & KONTROL DI SINI
+# Drain queue (process incoming msgs) - LOGIKA UTAMA: PREDIKSI, KONTROL & CSV LOGGING
 # ---------------------------
 def process_queue():
     updated = False
@@ -156,10 +157,8 @@ def process_queue():
             # Ambil data dari ESP32
             suhu = float(d.get("suhu", np.nan))
             lembap = float(d.get("lembap", np.nan))
-            light = int(d.get("light", np.nan)) # Nilai dibalik (4095=Terang)
-            rawLight = int(d.get("rawLight", np.nan)) # Nilai mentah (0=Terang)
-            
-            # Label dari ESP32 hanya sebagai penanda
+            light = int(d.get("light", np.nan)) # LightFix (Dibalik)
+            rawLight = int(d.get("rawLight", np.nan)) 
             status_esp = d.get("label", "N/A") 
             
             row = {
@@ -169,34 +168,31 @@ def process_queue():
                 "light": light,
                 "rawLight": rawLight,
                 "status_esp": status_esp, 
-                "prediksi_server": "Menunggu Prediksi",
+                "prediksi_server": "N/A",
                 "perintah_terkirim": "N/A"
             }
             
             # =========================================================
-            # START: LOGIKA PREDIKSI SCKIT-LEARN (SERVER)
+            # LOGIKA PREDIKSI SCKIT-LEARN (SERVER)
             # =========================================================
             prediksi_server = "N/A"
             
-            # Pastikan model dimuat dan semua nilai sensor valid (bukan NaN)
             if st.session_state.ml_model and not np.isnan([suhu, lembap, light]).any():
                 try:
-                    # PENTING: Konversi ke np.float64 dan pastikan bentuk array 2D [[...]]
-                    # Urutan fitur harus sama dengan pelatihan: [suhu, lembap, light (dibalik)]
+                    # PERBAIKAN PENTING: Gunakan np.float64 dan pastikan array 2D [[...]]
+                    # Urutan fitur harus [suhu, lembap, light] (sesuai pelatihan Anda)
                     fitur_input = np.array([[np.float64(suhu), np.float64(lembap), np.float64(light)]]) 
                     
                     # Prediksi
                     prediksi_server = st.session_state.ml_model.predict(fitur_input)[0]
                     
-                    # -----------------------------------------------------------------
-                    # KIRIM PERINTAH KONTROL BALIK KE ESP32 MELALUI MQTT
-                    # -----------------------------------------------------------------
+                    # --- KONTROL LED BALIK KE ESP32 ---
                     perintah_led = ""
                     if "Aman" in prediksi_server:
                         perintah_led = "LED_HIJAU"
                     elif "Waspada" in prediksi_server:
                         perintah_led = "LED_KUNING"
-                    else: # Tidak Aman atau label lainnya
+                    else: 
                         perintah_led = "LED_MERAH"
                         
                     try:
@@ -205,17 +201,13 @@ def process_queue():
                         pubc.publish(TOPIC_OUTPUT, perintah_led) 
                         pubc.disconnect()
                         row["perintah_terkirim"] = perintah_led
-                    except Exception as e:
-                        row["perintah_terkirim"] = f"ERROR PUBLISH: {e}" 
-                    # -----------------------------------------------------------------
+                    except Exception:
+                        row["perintah_terkirim"] = "ERROR PUBLISH" 
 
                 except Exception as e:
-                    # Ini adalah error yang sering terjadi (numpy is not iterable)
-                    row["prediksi_server"] = f"Prediksi Error: argument of type {type(suhu)} is not iterable" 
+                    row["prediksi_server"] = f"ML Error: {e}" 
             
             row["prediksi_server"] = str(prediksi_server)
-            # =========================================================
-            # END: LOGIKA PREDIKSI SCKIT-LEARN (SERVER)
             # =========================================================
 
             st.session_state.last = row
@@ -225,6 +217,25 @@ def process_queue():
                 st.session_state.logs = st.session_state.logs[-5000:]
             updated = True
             
+    # =========================================================
+    # LOGIKA OTOMATIS MENULIS KE CSV (Setelah data diproses)
+    # =========================================================
+    if updated and st.session_state.logs:
+        try:
+            df_log = pd.DataFrame(st.session_state.logs)
+            
+            # Hanya simpan kolom yang relevan untuk ML/Logging
+            # (rawLight disimpan karena berguna jika ingin melatih ulang dengan data mentah)
+            df_export = df_log[['ts', 'suhu', 'lembap', 'light', 'rawLight', 'prediksi_server']].copy()
+            
+            # Tulis ke file CSV (menimpa file setiap update)
+            df_export.to_csv(CSV_LOG_PATH, index=False)
+            
+        except Exception:
+            pass # Gagal menulis ke disk
+            
+    # =========================================================
+    
     return updated
 
 # run once here to pick up immediately available messages
@@ -235,8 +246,7 @@ _ = process_queue()
 # ---------------------------
 if HAS_AUTOREFRESH:
     st_autorefresh(interval=2000, limit=None, key="autorefresh") 
-    
-[Image of the Streamlit and MQTT architecture]
+
 
 left, right = st.columns([1, 2])
 
@@ -256,7 +266,6 @@ with left:
         st.write(f"Suhu: **{last.get('suhu')} °C**")
         st.write(f"Lembap: **{last.get('lembap')} %**")
         st.write(f"Light (Dibalik): **{last.get('light')}**")
-        st.write(f"RAW Light: **{last.get('rawLight')}**")
         st.markdown("---")
 
         st.markdown("### Prediksi Server (scikit-learn)")
@@ -271,13 +280,17 @@ with left:
 
     st.markdown("---")
     st.header("Download Logs")
-    if st.button("Download CSV"):
-        if st.session_state.logs:
-            df_dl = pd.DataFrame(st.session_state.logs)
-            csv = df_dl.to_csv(index=False).encode("utf-8")
-            st.download_button("Download CSV file", data=csv, file_name=f"iot_logs_{int(time.time())}.csv")
+    st.caption(f"File log otomatis: **{CSV_LOG_PATH}**")
+    
+    # Tombol Download akan membaca file CSV yang terakhir disimpan di disk
+    if st.button("Download CSV Log"):
+        if os.path.exists(CSV_LOG_PATH):
+            with open(CSV_LOG_PATH, "r") as file:
+                csv_data = file.read().encode("utf-8")
+                st.download_button("Download CSV file", data=csv_data, file_name=CSV_LOG_PATH)
         else:
-            st.info("No logs to download")
+            st.info("File log belum ada. Tunggu data masuk.")
+
 
 with right:
     st.header("Live Chart (last 200 points)")
@@ -286,11 +299,8 @@ with right:
     if (not df_plot.empty) and {"suhu", "lembap", "light"}.issubset(df_plot.columns):
         fig = go.Figure()
         
-        # Suhu dan Kelembaban (Primary & Secondary Axis)
         fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["suhu"], mode="lines+markers", name="Suhu (°C)"))
         fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["lembap"], mode="lines+markers", name="Lembap (%)", yaxis="y2"))
-        
-        # Cahaya (Light)
         fig.add_trace(go.Scatter(x=df_plot["ts"], y=df_plot["light"], mode="lines", name="Light (0-4095)", yaxis="y3", opacity=0.3))
 
         fig.update_layout(
@@ -301,7 +311,6 @@ with right:
             hovermode="x unified"
         )
         
-        # Pewarnaan marker chart berdasarkan Prediksi Server
         colors = []
         for _, r in df_plot.iterrows():
             stat = r.get("prediksi_server", "")
@@ -317,7 +326,6 @@ with right:
 
     st.markdown("### Recent Logs")
     if st.session_state.logs:
-        # Menampilkan kolom prediksi_server
         df_display = pd.DataFrame(st.session_state.logs)[["ts", "suhu", "lembap", "light", "prediksi_server", "perintah_terkirim"]].rename(columns={
             "light": "Light (Dibalik)",
             "prediksi_server": "Prediksi Server (ML)",
